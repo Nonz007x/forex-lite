@@ -9,6 +9,8 @@ from stable_baselines3 import PPO
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
+from models.prototype_3.prototype_3 import StockTradingEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 context = zmq.Context()
 socket = context.socket(zmq.ROUTER)
@@ -39,7 +41,7 @@ def load_model(model_path):
 
   return MODEL_CACHE[model_path_str]
 
-def evaluate_with_model(ohlc_json, model):
+def evaluate_with_model(ohlc_json, positions, model):
   try:
     data_list = json.loads(ohlc_json)
 
@@ -49,7 +51,7 @@ def evaluate_with_model(ohlc_json, model):
     numeric_cols = ['open', 'high', 'low', 'close', 'tick_volume']
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
 
-    if len(df) < 109:
+    if len(df) < 110:
       print(f"Error: Not enough data (only {len(df)} rows)")
       sys.exit(1)
 
@@ -70,23 +72,26 @@ def evaluate_with_model(ohlc_json, model):
     
     df.dropna(inplace=True)
 
-    if len(df) < 60:
+    if len(df) < 61:
       print(f"Error: Invalid data shape after indicators {df.shape}")
       sys.exit(1)
 
-    action_signal, _ = model.predict(df.values.astype(np.float32), deterministic=True)
-    
-    action_map = {0: "hold", 1: "open_long", 2: "open_short"}
-    return action_map.get(int(action_signal), "ERROR")
+    env = DummyVecEnv([lambda: StockTradingEnv(data=df, features=14, positions=positions)])
+
+    obs = env.reset()
+    action_signal, _ = model.predict(obs)
+    obs, _, _, infos = env.step(action_signal)
+
+    return infos[0].get("action")
 
   except Exception as e:
     print(f"ERROR: {e}", flush=True)
 
-def run_prediction(model_id, data):
+def run_prediction(model_id, data, positions):
   current_dir = Path(__file__).parent
-  model_path = current_dir / "models" / {model_id} / "model"
+  model_path = current_dir / "models" / f"{model_id}" / "model"
   model = load_model(model_path)
-  action = evaluate_with_model(data, model)
+  action = evaluate_with_model(data, positions, model)
   prediction = json.dumps({"action": action})
   return bytes(prediction, "utf-8")
 
@@ -119,7 +124,7 @@ while True:
         model_id = data.get("model_id")
         market_data = data.get("market_data")
 
-        response = run_prediction(model_id, market_data)
+        response = run_prediction(model_id, market_data, positions)
 
       elif "backtest" in message_str:
         try:
@@ -135,8 +140,9 @@ while True:
 
         model_id = data.get("model_id")
         market_data = data.get("market_data")
+        positions = data.get("positions")
 
-        response = run_prediction(model_id, market_data)
+        response = run_prediction(model_id, market_data, positions)
 
       elif "init" in message_str:
         response = b"Connection established..."
