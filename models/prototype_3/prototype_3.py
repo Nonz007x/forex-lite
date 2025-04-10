@@ -19,10 +19,6 @@ class StockTradingEnv(gym.Env):
 
   def step(self, action_signal):
     current_price = self.data['close'].iloc[self.current_step]
-    # print(self.data.iloc[self.current_step])
-    # print("Current step: ", self.current_step)
-    # print("Current price: " + f"{current_price}")
-    print(self.positions)
     reward = 0
     action = "nothing"
 
@@ -138,7 +134,7 @@ class StockTradingEnv(gym.Env):
       if position["type"] == position_type:
         entry_price = position["entry_price"]
         cost_basis = entry_price * self.volume
-        profit = (entry_price - current_price) * self.volume if position_type == "buy" else (current_price - entry_price) * self.volume
+        profit = (current_price - entry_price) * self.volume if position_type == "buy" else (entry_price - current_price) * self.volume
         self.balance += cost_basis + profit
         total_profit += profit
       else:

@@ -1,0 +1,1 @@
+    events = dict(poller.poll(timeout=100))
