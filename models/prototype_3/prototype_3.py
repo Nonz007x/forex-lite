@@ -19,6 +19,10 @@ class StockTradingEnv(gym.Env):
 
   def step(self, action_signal):
     current_price = self.data['close'].iloc[self.current_step]
+    # print(self.data.iloc[self.current_step])
+    # print("Current step: ", self.current_step)
+    # print("Current price: " + f"{current_price}")
+    print(self.positions)
     reward = 0
     action = "nothing"
 
@@ -39,7 +43,6 @@ class StockTradingEnv(gym.Env):
         action = "openShort"
       else:
         action = "hold"
-
 
     if action == "hold":
       pass
@@ -102,7 +105,14 @@ class StockTradingEnv(gym.Env):
     if self.positions is None:
       self.positions = []
 
-    return self._get_state(), {}
+    return self._get_state(), {
+      "positions": self.positions
+    }
+
+  def update_data(self, new_data):
+    self.data = new_data
+    # Rewind to last window if needed, but don't reset other state
+    self.current_step = max(self.window_size, min(self.current_step, len(new_data) - 1))
 
 
   def _get_state(self):

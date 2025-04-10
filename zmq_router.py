@@ -23,6 +23,7 @@ poller.register(socket, zmq.POLLIN)
 print("ZeroMQ server is running...")
 
 MODEL_CACHE = {}
+ENV_CACHE = {}
 
 def load_model(model_path):
   """
@@ -41,59 +42,56 @@ def load_model(model_path):
 
   return MODEL_CACHE[model_path_str]
 
-def evaluate_with_model(ohlc_json, positions, model):
-  try:
-    data_list = json.loads(ohlc_json)
+def preprocess_data(data_list):
+  df = pd.DataFrame(data_list)
+  df = df.iloc[::-1]
+  df.drop(columns=['time'], errors='ignore', inplace=True)
+  df[['open', 'high', 'low', 'close', 'tick_volume']] = df[[
+    'open', 'high', 'low', 'close', 'tick_volume']].apply(pd.to_numeric, errors='coerce')
+  
+  df['EMA_12'] = EMAIndicator(df['close'], window=12).ema_indicator()
+  df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+  df['MACD'] = MACD(df['close']).macd()
+  df['RSI'] = RSIIndicator(df['close']).rsi()
+  bb = BollingerBands(df['close'], window=20)
+  df['BB_Upper'] = bb.bollinger_hband()
+  df['BB_Lower'] = bb.bollinger_lband()
+  adx = ADXIndicator(df['high'], df['low'], df['close'])
+  df['ADX'] = adx.adx()
+  df['ADX_Positive'] = adx.adx_pos()
+  df['ADX_Negative'] = adx.adx_neg()
 
-    df = pd.DataFrame(data_list)
-    df.drop(columns=['time'], errors='ignore', inplace=True)
+  df.dropna(inplace=True)
 
-    numeric_cols = ['open', 'high', 'low', 'close', 'tick_volume']
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
-
-    if len(df) < 110:
-      print(f"Error: Not enough data (only {len(df)} rows)")
-      sys.exit(1)
-
-    df['EMA_12'] = EMAIndicator(df['close'], window=12).ema_indicator()
-    df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-    df['MACD'] = MACD(df['close']).macd()
-    
-    df['RSI'] = RSIIndicator(df['close']).rsi()
-    bb = BollingerBands(df['close'], window=20)
-    
-    df['BB_Upper'] = bb.bollinger_hband()
-    df['BB_Lower'] = bb.bollinger_lband()
-
-    adx_indicator = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
-    df['ADX'] = adx_indicator.adx()
-    df['ADX_Positive'] = adx_indicator.adx_pos()
-    df['ADX_Negative'] = adx_indicator.adx_neg()
-    
-    df.dropna(inplace=True)
-
-    if len(df) < 61:
-      print(f"Error: Invalid data shape after indicators {df.shape}")
-      sys.exit(1)
-
-    env = DummyVecEnv([lambda: StockTradingEnv(data=df, features=14, positions=positions)])
-
-    obs = env.reset()
-    action_signal, _ = model.predict(obs)
-    obs, _, _, infos = env.step(action_signal)
-
-    return infos[0].get("action")
-
-  except Exception as e:
-    print(f"ERROR: {e}", flush=True)
+  return df
 
 def run_prediction(model_id, data, positions):
   current_dir = Path(__file__).parent
   model_path = current_dir / "models" / f"{model_id}" / "model"
   model = load_model(model_path)
-  action = evaluate_with_model(data, positions, model)
-  prediction = json.dumps({"action": action})
-  return bytes(prediction, "utf-8")
+
+  session_key = f"env_{model_id}"
+
+  df = preprocess_data(data)
+
+  if session_key not in ENV_CACHE:
+    ENV_CACHE[session_key] = DummyVecEnv([
+      lambda: StockTradingEnv(data=df, features=14, positions=positions)
+    ])
+  else:
+    env = ENV_CACHE[session_key]
+    env.envs[0].update_data(df)  # ← Update with latest data
+
+  env = ENV_CACHE[session_key]
+
+  obs = env.envs[0]._get_state()
+  obs = np.expand_dims(obs, axis=0)
+
+  action_signal, _ = model.predict(obs)
+  _, _, _, infos = env.step(action_signal)
+
+  print("Balance: " + f"{infos[0].get('balance')}")
+  return json.dumps({"action": infos[0].get("action")}).encode("utf-8")
 
 while True:
   try:
@@ -109,24 +107,7 @@ while True:
       print(f"Received from {identity.hex()}")
       response = None
 
-      if "signal_request" in message_str:
-        try:
-          data = json.loads(message_str)
-          if isinstance(data, str):
-            data = json.loads(data)
-        except json.JSONDecodeError as e:
-          print(f"JSON Decode Error: {e} | Raw: {message_str}")
-          data = None
-
-        if not data:
-          response = b"No data found!"
-
-        model_id = data.get("model_id")
-        market_data = data.get("market_data")
-
-        response = run_prediction(model_id, market_data, positions)
-
-      elif "backtest" in message_str:
+      if "backtest" in message_str:
         try:
           data = json.loads(message_str)
           if isinstance(data, str):
@@ -141,7 +122,7 @@ while True:
         model_id = data.get("model_id")
         market_data = data.get("market_data")
         positions = data.get("positions")
-
+        market_data = json.loads(market_data)
         response = run_prediction(model_id, market_data, positions)
 
       elif "init" in message_str:
